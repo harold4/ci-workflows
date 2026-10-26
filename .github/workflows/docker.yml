@@ -1,0 +1,140 @@
+name: Docker image
+
+# Reusable workflow: build a Docker image, push it to GHCR, prune old builds.
+# Caller job needs: permissions: { contents: read, packages: write }
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: GHCR image name (default: caller repository name)
+        type: string
+        default: ''
+      context:
+        description: Build context
+        type: string
+        default: .
+      dockerfile:
+        description: Dockerfile path (default: <context>/Dockerfile)
+        type: string
+        default: ''
+      version-from:
+        description: package.json or VERSION file -> v{ver} tag + BUILD_VERSION build-arg
+        type: string
+        default: ''
+      build-args:
+        description: Extra build-args, one KEY=value per line
+        type: string
+        default: ''
+      cache-scope:
+        description: GHA cache scope (default: image name)
+        type: string
+        default: ''
+      keep-builds:
+        description: Builds kept by the cleanup; 0 disables cleanup
+        type: number
+        default: 5
+    secrets:
+      secret-build-args:
+        description: Secret build-args, one KEY=value per line
+        required: false
+      build-secrets:
+        description: BuildKit secrets (id=value per line) for --mount=type=secret
+        required: false
+    outputs:
+      image:
+        description: Full image reference without tag
+        value: ${{ jobs.build.outputs.image }}
+      hash:
+        description: Short commit hash used as tag and BUILD_HASH
+        value: ${{ jobs.build.outputs.hash }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      hash: ${{ steps.build.outputs.hash }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set build metadata
+        id: build
+        env:
+          IMAGE: ${{ inputs.image }}
+          VERSION_FROM: ${{ inputs.version-from }}
+          CACHE_SCOPE: ${{ inputs.cache-scope }}
+        run: |
+          name="${IMAGE:-${GITHUB_REPOSITORY#*/}}"
+          name="${name,,}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${name}" >> "$GITHUB_OUTPUT"
+          echo "hash=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "cache-scope=${CACHE_SCOPE:-$name}" >> "$GITHUB_OUTPUT"
+          ver=""
+          if [ -n "$VERSION_FROM" ]; then
+            case "$VERSION_FROM" in
+              *.json) ver=$(jq -r '.version // empty' "$VERSION_FROM") ;;
+              *)      ver=$(tr -d '[:space:]' < "$VERSION_FROM") ;;
+            esac
+            if [ -z "$ver" ]; then
+              echo "::error::no version found in $VERSION_FROM"
+              exit 1
+            fi
+          fi
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.build.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.build.outputs.hash }}
+            type=raw,value=v${{ steps.build.outputs.version }},enable=${{ steps.build.outputs.version != '' }}
+            type=semver,pattern=v{{version}}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          provenance: false
+          sbom: false
+          build-args: |
+            BUILD_HASH=${{ steps.build.outputs.hash }}
+            BUILD_DATE=${{ steps.build.outputs.date }}
+            ${{ steps.build.outputs.version != '' && format('BUILD_VERSION={0}', steps.build.outputs.version) || '' }}
+            ${{ inputs.build-args }}
+            ${{ secrets.secret-build-args }}
+          secrets: ${{ secrets.build-secrets }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ steps.build.outputs.cache-scope }}
+          cache-to: type=gha,scope=${{ steps.build.outputs.cache-scope }},mode=max,ignore-error=true
+
+      - name: Prune old builds
+        if: inputs.keep-builds > 0
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          package: ${{ steps.build.outputs.name }}
+          keep-n-tagged: ${{ inputs.keep-builds }}
+          delete-untagged: true
