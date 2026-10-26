@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       image:
-        description: GHCR image name (default: caller repository name)
+        description: 'GHCR image name (default: caller repository name)'
         type: string
         default: ''
       context:
@@ -15,7 +15,7 @@ on:
         type: string
         default: .
       dockerfile:
-        description: Dockerfile path (default: <context>/Dockerfile)
+        description: 'Dockerfile path (default: <context>/Dockerfile)'
         type: string
         default: ''
       version-from:
@@ -27,7 +27,7 @@ on:
         type: string
         default: ''
       cache-scope:
-        description: GHA cache scope (default: image name)
+        description: 'GHA cache scope (default: image name)'
         type: string
         default: ''
       keep-builds:
